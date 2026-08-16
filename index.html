@@ -124,6 +124,8 @@ p:last-child{ margin-bottom:0; }
 
 /* ---------- Layout helpers ---------- */
 .wrap{ max-width:var(--maxw); margin:0 auto; padding-inline:var(--gut); }
+/* keep anchor targets and focused fields clear of the sticky header */
+section[id], .field, form{ scroll-margin-top:96px; }
 .section{ padding-block:var(--sec); }
 .lede{ font-size:clamp(1.075rem, 1.5vw, 1.3rem); line-height:1.55; color:var(--gray-700); }
 .measure{ max-width:60ch; }
@@ -453,6 +455,32 @@ p:last-child{ margin-bottom:0; }
 }
 .blue .form__status{ background:rgba(255,255,255,.07); border-color:rgba(255,255,255,.35); color:#fff; }
 .form__status[hidden]{ display:none; }
+
+/* form states — validation, success, failure */
+.field__error{
+  margin:0; font-size:0.84rem; font-weight:500; color:#a3231c; line-height:1.4;
+}
+.blue .field__error{ color:#ffc2ba; }
+.field.is-invalid input, .field.is-invalid select, .field.is-invalid textarea{
+  border-color:#a3231c; border-width:1.5px;
+}
+.blue .field.is-invalid input, .blue .field.is-invalid select, .blue .field.is-invalid textarea{
+  border-color:#ffc2ba;
+}
+.form__status--ok{
+  border-style:solid; border-color:var(--versa-blue); background:var(--sky-tint-2); color:var(--ink);
+}
+.form__status--err{
+  border-style:solid; border-color:#a3231c; background:#fdf1f0; color:#7a1b15;
+}
+.blue .form__status--ok{ border-color:#fff; background:rgba(255,255,255,.12); color:#fff; }
+.blue .form__status--err{ border-color:#ffc2ba; background:rgba(255,194,186,.14); color:#ffe3df; }
+.btn[disabled]{ cursor:default; opacity:.75; }
+/* honeypot — never shown to a real visitor */
+.hp{
+  position:absolute !important; width:1px; height:1px; overflow:hidden;
+  clip:rect(0,0,0,0); white-space:nowrap; border:0; padding:0; margin:-1px;
+}
 @media (max-width: 620px){ .form__row{ grid-template-columns:1fr; } }
 
 .signup{ background:var(--sky-tint); }
@@ -891,6 +919,10 @@ p:last-child{ margin-bottom:0; }
         <label for="interest">What interests you about VersaLux? <span class="opt">(optional)</span></label>
         <textarea id="interest" name="interest" rows="4"></textarea>
       </div>
+      <div class="hp" aria-hidden="true">
+        <label for="vl_website">Leave this field empty</label>
+        <input id="vl_website" type="text" name="_website" tabindex="-1" autocomplete="off">
+      </div>
       <div>
         <button class="btn btn--primary" type="submit">Keep me updated</button>
       </div>
@@ -950,6 +982,10 @@ p:last-child{ margin-bottom:0; }
       <div class="field">
         <label for="bmsg">Message</label>
         <textarea id="bmsg" name="message" rows="5" required></textarea>
+      </div>
+      <div class="hp" aria-hidden="true">
+        <label for="vl_botcheck">Leave this field empty</label>
+        <input id="vl_botcheck" type="checkbox" name="botcheck" tabindex="-1" autocomplete="off">
       </div>
       <div>
         <button class="btn btn--onblue" type="submit">Start a conversation</button>
@@ -1098,27 +1134,257 @@ p:last-child{ margin-bottom:0; }
     document.querySelectorAll('.reveal, .moment__seq li').forEach(function (el) { el.classList.add('in'); });
   }
 
-  /* ---- Forms ------------------------------------------------------------
-     No submission endpoint is connected yet. Replace the handler below with
-     a POST to your email service, CRM or form backend when one is chosen.
-     [FORM ENDPOINT TO BE PROVIDED]
-     ---------------------------------------------------------------------- */
-  function wire(formId, statusId, message) {
-    var form = document.getElementById(formId);
-    var status = document.getElementById(statusId);
-    if (!form || !status) { return; }
-    form.addEventListener('submit', function (e) {
-      e.preventDefault();
-      if (!form.checkValidity()) { form.reportValidity(); return; }
-      status.hidden = false;
-      status.textContent = message;
-      status.scrollIntoView({ block: 'nearest', behavior: reduce ? 'auto' : 'smooth' });
+  /* ====================================================================
+     FORMS
+     --------------------------------------------------------------------
+     Fill in the two values below to make both forms live. Leave a value
+     empty and that form stays in "not connected" mode — it validates and
+     explains itself, but sends nothing.
+     ==================================================================== */
+  var VERSALUX_FORMS = {
+
+    // ---- Interest list -> Kit (kit.com) ------------------------------
+    // In Kit, create a form, then read the number out of the browser URL
+    // while editing it:  app.kit.com/forms/designers/1234567/edit
+    // Paste that number here as a string.
+    kitFormId: '',
+
+    // Kit sends a confirmation email when double opt-in is ON (the default
+    // and the recommended setting). If you switch double opt-in OFF, change
+    // this message so it no longer mentions confirming.
+    kitSuccess: 'Thanks — you\'re on the list. Check your email and click the ' +
+                'confirmation link to finish signing up.',
+
+    // ---- Business inquiries -> Web3Forms -> your inbox ----------------
+    // Sign up at web3forms.com with info@versaluxinnovations.com. They email
+    // you an access key — paste it here. Inquiries then arrive in that inbox.
+    web3formsAccessKey: '',
+
+    businessSuccess: 'Thanks for reaching out. Your inquiry has been sent and ' +
+                     'we\'ll be in touch.'
+  };
+
+  var FALLBACK_EMAIL = 'info@versaluxinnovations.com';
+
+  /* ---- small helpers ---- */
+
+  function statusOf(form) { return document.getElementById(form.id === 'interestForm' ? 'interestStatus' : 'businessStatus'); }
+
+  function setStatus(el, message, kind) {
+    el.hidden = false;
+    el.textContent = message;
+    el.className = 'form__status' + (kind ? ' form__status--' + kind : '');
+  }
+
+  function setBusy(button, on, label) {
+    if (on) {
+      button.setAttribute('data-idle-label', button.textContent);
+      button.textContent = label;
+      button.disabled = true;
+      button.setAttribute('aria-busy', 'true');
+    } else {
+      var idle = button.getAttribute('data-idle-label');
+      if (idle) { button.textContent = idle; }
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+    }
+  }
+
+  /* ---- inline validation (replaces the browser's native bubbles, which
+          overlap neighbouring labels and vanish on the next click) ---- */
+
+  function clearErrors(form) {
+    Array.prototype.forEach.call(form.querySelectorAll('.field.is-invalid'), function (field) {
+      field.classList.remove('is-invalid');
+      var note = field.querySelector('.field__error');
+      if (note) { note.textContent = ''; }
+      var input = field.querySelector('input, select, textarea');
+      if (input) { input.removeAttribute('aria-invalid'); }
     });
   }
-  wire('interestForm', 'interestStatus',
-    'This form is not connected to a mailing service yet, so nothing was sent. [FORM ENDPOINT TO BE PROVIDED]');
-  wire('businessForm', 'businessStatus',
-    'This form is not connected to an inbox yet, so nothing was sent. [BUSINESS INQUIRY ENDPOINT TO BE PROVIDED]');
+
+  function showError(input, message) {
+    var field = input.closest('.field');
+    if (!field) { return; }
+    field.classList.add('is-invalid');
+    input.setAttribute('aria-invalid', 'true');
+    var note = field.querySelector('.field__error');
+    if (!note) {
+      note = document.createElement('p');
+      note.className = 'field__error';
+      note.id = (input.id || input.name) + '-error';
+      field.appendChild(note);
+    }
+    note.textContent = message;
+    var described = (input.getAttribute('aria-describedby') || '').split(' ').filter(Boolean);
+    if (described.indexOf(note.id) === -1) {
+      described.push(note.id);
+      input.setAttribute('aria-describedby', described.join(' '));
+    }
+  }
+
+  function messageFor(input) {
+    if (input.validity.valueMissing) {
+      return input.tagName === 'SELECT' ? 'Please choose an option.' : 'Please fill this in.';
+    }
+    if (input.validity.typeMismatch && input.type === 'email') {
+      return 'Please enter a valid email address.';
+    }
+    return 'Please check this field.';
+  }
+
+  function isValid(form) {
+    clearErrors(form);
+    var invalid = [];
+    Array.prototype.forEach.call(form.querySelectorAll('input, select, textarea'), function (input) {
+      if (input.closest('.hp')) { return; }
+      if (!input.checkValidity()) { showError(input, messageFor(input)); invalid.push(input); }
+    });
+    if (invalid.length) { invalid[0].focus(); }
+    return invalid.length === 0;
+  }
+
+  /* re-validate a field once the visitor has fixed it */
+  function liveClear(form) {
+    form.addEventListener('input', function (e) {
+      var field = e.target.closest('.field');
+      if (field && field.classList.contains('is-invalid') && e.target.checkValidity()) {
+        field.classList.remove('is-invalid');
+        var note = field.querySelector('.field__error');
+        if (note) { note.textContent = ''; }
+        e.target.removeAttribute('aria-invalid');
+      }
+    });
+  }
+
+  function value(form, name) {
+    var el = form.elements[name];
+    return el && el.value ? el.value.trim() : '';
+  }
+
+  /* ---- interest list -> Kit ---- */
+
+  var interestForm = document.getElementById('interestForm');
+  if (interestForm) {
+    liveClear(interestForm);
+    interestForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var status = statusOf(interestForm);
+      var button = interestForm.querySelector('button[type="submit"]');
+
+      if (value(interestForm, '_website')) { return; }          // honeypot tripped
+      if (!isValid(interestForm)) {
+        setStatus(status, 'Please correct the highlighted fields and try again.', 'err');
+        return;
+      }
+
+      if (!VERSALUX_FORMS.kitFormId) {
+        setStatus(status, 'This form is not connected to a mailing list yet, so nothing was sent. ' +
+                          'Add your Kit form ID to VERSALUX_FORMS in this page\'s script to switch it on.', null);
+        return;
+      }
+
+      setBusy(button, true, 'Sending…');
+      setStatus(status, 'Sending…', null);
+
+      var payload = new FormData();
+      payload.append('email_address', value(interestForm, 'email'));
+      payload.append('fields[first_name]', value(interestForm, 'firstName'));
+      payload.append('fields[last_name]', value(interestForm, 'lastName'));
+      if (value(interestForm, 'interest')) {
+        payload.append('fields[interest]', value(interestForm, 'interest'));
+      }
+
+      fetch('https://app.kit.com/forms/' + VERSALUX_FORMS.kitFormId + '/subscriptions', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: payload
+      })
+        .then(function (response) {
+          return response.json().catch(function () { return {}; })
+            .then(function (data) { return { ok: response.ok, data: data }; });
+        })
+        .then(function (result) {
+          if (result.ok && result.data.status !== 'error') {
+            interestForm.reset();
+            setStatus(status, VERSALUX_FORMS.kitSuccess, 'ok');
+          } else {
+            setStatus(status, 'Something went wrong on our end and you were not added. ' +
+                              'Please try again, or email ' + FALLBACK_EMAIL + '.', 'err');
+          }
+        })
+        .catch(function () {
+          setStatus(status, 'We couldn\'t reach the server. Check your connection and try again, ' +
+                            'or email ' + FALLBACK_EMAIL + '.', 'err');
+        })
+        .then(function () { setBusy(button, false); });
+    });
+  }
+
+  /* ---- business inquiries -> Web3Forms -> inbox ---- */
+
+  var businessForm = document.getElementById('businessForm');
+  if (businessForm) {
+    liveClear(businessForm);
+    businessForm.addEventListener('submit', function (e) {
+      e.preventDefault();
+      var status = statusOf(businessForm);
+      var button = businessForm.querySelector('button[type="submit"]');
+
+      if (businessForm.elements['botcheck'] && businessForm.elements['botcheck'].checked) { return; }
+      if (!isValid(businessForm)) {
+        setStatus(status, 'Please correct the highlighted fields and try again.', 'err');
+        return;
+      }
+
+      if (!VERSALUX_FORMS.web3formsAccessKey) {
+        setStatus(status, 'This form is not connected to an inbox yet, so nothing was sent. ' +
+                          'Add your Web3Forms access key to VERSALUX_FORMS in this page\'s script to switch it on.', null);
+        return;
+      }
+
+      setBusy(button, true, 'Sending…');
+      setStatus(status, 'Sending…', null);
+
+      var inquiry = value(businessForm, 'inquiryType') || 'General business inquiry';
+
+      fetch('https://api.web3forms.com/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          access_key: VERSALUX_FORMS.web3formsAccessKey,
+          subject: 'VersaLux business inquiry — ' + inquiry,
+          from_name: 'VersaLux website',
+          replyto: value(businessForm, 'email'),
+          name: value(businessForm, 'name'),
+          organization: value(businessForm, 'organization') || '(not given)',
+          email: value(businessForm, 'email'),
+          inquiry_type: inquiry,
+          message: value(businessForm, 'message'),
+          botcheck: false
+        })
+      })
+        .then(function (response) {
+          return response.json().catch(function () { return {}; })
+            .then(function (data) { return { ok: response.ok, data: data }; });
+        })
+        .then(function (result) {
+          if (result.ok && result.data.success) {
+            businessForm.reset();
+            setStatus(status, VERSALUX_FORMS.businessSuccess, 'ok');
+          } else {
+            setStatus(status, 'Something went wrong and your message was not sent. ' +
+                              'Please try again, or email ' + FALLBACK_EMAIL + ' directly.', 'err');
+          }
+        })
+        .catch(function () {
+          setStatus(status, 'We couldn\'t reach the server. Check your connection and try again, ' +
+                            'or email ' + FALLBACK_EMAIL + ' directly.', 'err');
+        })
+        .then(function () { setBusy(button, false); });
+    });
+  }
+
 })();
 </script>
 </body>
